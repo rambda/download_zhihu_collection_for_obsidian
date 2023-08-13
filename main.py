@@ -1,27 +1,30 @@
 # -*- coding:utf-8 -*-
-import os
-import random
-import sys
-import time
-import requests
-from bs4 import BeautifulSoup
-import re
-from tqdm import tqdm
 import argparse
-from utils import filter_title_str
-
+from datetime import datetime
+from pathlib import Path
+import random
+import time
+from dataclasses import dataclass, field
+import requests
+from requests import Response
 from markdownify import MarkdownConverter
 
-parser = argparse.ArgumentParser(description='知乎文章剪藏')
-parser.add_argument('collection_url', metavar='collection_url', type=str,nargs=1,
-                    help='收藏夹（必须是公开的收藏夹）的网址')
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/61.0.3163.100 Safari/537.36",
+    "Connection": "keep-alive",
+    "Accept": "text/html,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.8"}
+
 
 class ObsidianStyleConverter(MarkdownConverter):
     """
     Create a custom MarkdownConverter that adds two newlines after an image
     """
+    attachments_save_dir: str
 
-    def chomp(self, text):
+    @staticmethod
+    def chomp(text):
         """
         If the text in an inline tag like b, a, or em contains a leading or trailing
         space, strip the string and return a space as suffix of prefix, if needed.
@@ -31,27 +34,25 @@ class ObsidianStyleConverter(MarkdownConverter):
         prefix = ' ' if text and text[0] == ' ' else ''
         suffix = ' ' if text and text[-1] == ' ' else ''
         text = text.strip()
-        return (prefix, suffix, text)
+        return prefix, suffix, text
 
     def convert_img(self, el, text, convert_as_inline):
         alt = el.attrs.get('alt', None) or ''
         src = el.attrs.get('src', None) or ''
 
-        downloadDir = os.path.join(os.path.expanduser("~"), "Downloads", "剪藏")
-        if not os.path.exists(downloadDir):
-            os.mkdir(downloadDir)
-        assetsDir = os.path.join(downloadDir,'assets')
-        if not os.path.exists(assetsDir):
-            os.mkdir(assetsDir)
-
-        img_content = requests.get(url=src, headers=headers).content
         img_content_name = src.split('?')[0].split('/')[-1]
+        img_path = Path(self.attachments_save_dir, img_content_name)
+        if not img_path.is_file():
+            Path(self.attachments_save_dir).mkdir(exist_ok=True)
+            try:
+                img_content = requests.get(url=src, headers=HEADERS).content
+                with img_path.open('wb') as fp:
+                    fp.write(img_content)
+            except:
+                img_content_name = src
+                print(f"{src} download failed.")
 
-        imgPath = os.path.join(assetsDir,img_content_name)
-        with open(imgPath, 'wb') as fp:
-            fp.write(img_content)
-
-        return '![[%s]]\n(%s)\n\n' % (img_content_name, alt)
+        return f'![{alt}]({img_content_name})'
 
     def convert_a(self, el, text, convert_as_inline):
         prefix, suffix, text = self.chomp(text)
@@ -64,190 +65,181 @@ class ObsidianStyleConverter(MarkdownConverter):
             text = text.replace('[', '[^')
             return '%s' % text
 
-        if (el.attrs and 'data-reference-link' in el.attrs) or (el.attrs['class'] and ('ReferenceList-backLink' in el.attrs['class'])):
+        if (el.attrs and 'data-reference-link' in el.attrs) or (
+                'class' in el.attrs and el.attrs['class'] and ('ReferenceList-backLink' in el.attrs['class'])):
             text = '[^{}]: '.format(href[5])
             return '%s' % text
 
-        return super(ObsidianStyleConverter, self).convert_a(el, text, convert_as_inline)
+        return super().convert_a(el, text, convert_as_inline)
 
     def convert_li(self, el, text, convert_as_inline):
         if el and el.find('a', {'aria-label': 'back'}) is not None:
             return '%s\n' % ((text or '').strip())
 
-        return super(ObsidianStyleConverter, self).convert_li(el, text, convert_as_inline)
+        return super().convert_li(el, text, convert_as_inline)
 
 
-def markdownify(html, **options):
-    return ObsidianStyleConverter(**options).convert(html)
+@dataclass
+class Item:
+    id: str = ""
+    url: str = ""
+    type: str = ""
+    title: str = ""
+    # question_id = ""
+    # question_desc = ""
+    author_name: str = ""
+    author_url: str = ""
+    column_title: str = ""
+    column_url: str = ""
+    created_time: int = 0
+    updated_time: int = 0
+    content: str = ""
 
 
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.100 Safari/537.36",
-    "Connection": "keep-alive",
-    "Accept": "text/html,application/json,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "zh-CN,zh;q=0.8"}
-
-
-# 获取收藏夹的回答总数
-def get_article_nums_of_collection(collection_id):
-    """
-    :param starturl: 收藏夹连接
-    :return: 收藏夹的页数
-    """
-    try:
-        collection_url = "https://www.zhihu.com/api/v4/collections/{}/items".format(collection_id)
-        html = requests.get(collection_url, headers=headers)
-        html.raise_for_status()
-
-        # 页面总数
-        return html.json()['paging'].get('totals')
-    except:
-        return None
+@dataclass
+class Collection:
+    id: str = ""
+    url: str = ""
+    title: str = ""
+    items: list[Item] = field(default_factory=list)
 
 
 # 解析出每个回答的具体链接
-def get_article_urls_in_collection(collection_id):
-    collection_id =collection_id.replace('\n','')
+def get_collection(collection_id: str) -> Collection:
+    collection = Collection()
+    collection.id = collection_id
 
+    try:
+        url = f"https://www.zhihu.com/api/v4/collections/{collection_id}"
+        html = requests.get(url, headers=HEADERS)
+        html.raise_for_status()
+        data = html.json()
+
+        collection.item_count = data['collection']['item_count']
+        collection.title = data['collection']['title']
+
+    except:
+        return None
+
+    items = []
+    collection.items = items
     offset = 0
     limit = 20
-
-    article_nums = get_article_nums_of_collection(collection_id)
-
-    url_list = []
-    title_list = []
-    while offset < article_nums:
-        collection_url = "https://www.zhihu.com/api/v4/collections/{}/items?offset={}&limit={}".format(collection_id,
-                                                                                                       offset, limit)
+    i = 0
+    page_num = 1
+    while offset < collection.item_count:
+        url = f"https://www.zhihu.com/api/v4/collections/{collection_id}/items?offset={offset}&limit={limit}"
         try:
-            html = requests.get(collection_url, headers=headers)
+            html: Response = requests.get(url, headers=HEADERS)
             content = html.json()
         except:
             return None
 
+        print("page_num = ", page_num)
+        print("offset = ", offset)
+        print("list_size = ", len(content['data']))
         for el in content['data']:
-            url_list.append(el['content']['url'])
-            if el['content']['type'] == 'answer':
-                title_list.append(el['content']['question']['title'])
+            item = Item()
+            items.append(item)
+            item.id = el['content']['id']
+            item.url = el['content']['url']
+            item.type = el['content']['type']
+            if item.type == 'answer':
+                item.title = el['content']['question']['title']
+                item.content = el['content']['content']
+                # item.question_id = el['content']['question']['id']
+            elif item.type == 'pin':
+                # item.title = el['content']['excerpt_title']
+                item.content = el['content']['content'][0]['content']
+            elif item.type == 'article':
+                item.title = el['content']['title']
+                item.content = el['content']['content']
+                if 'column' in el['content']:
+                    item.column_title = el['content']['column']['title']
+                    item.column_url = el['content']['column']['url']
+            elif item.type == 'zvideo':
+                pass
             else:
-                title_list.append(el['content']['title'])
+                item.content = el['content']['content']
+
+            item.author_name = el['content']['author']['name']
+            item.author_url = el['content']['author']['url']
+
+            key_names = [('created', 'updated'),
+                         ('created_time', 'updated_time'),
+                         ('created_at', 'updated_at')]
+
+            for pair in key_names:
+                if pair[0] in el['content']:
+                    item.created_time = el['content'][pair[0]]
+                    item.updated_time = el['content'][pair[1]]
+                    break
+
+            i += 1
+            print(f"{i}/{collection.item_count} - {item.id}")
+        page_num += 1
+        print("---")
 
         offset += limit
+        time.sleep(random.uniform(0.5, 3.0))
 
-    return url_list,title_list
-
-
-# 获得单条答案的数据
-def get_single_answer_content(answer_url):
-    # all_content = {}
-    # question_id, answer_id = re.findall('https://www.zhihu.com/question/(\d+)/answer/(\d+)', answer_url)[0]
-
-    html_content = requests.get(answer_url, headers=headers)
-    soup = BeautifulSoup(html_content.text, "lxml")
-    answer_content = soup.find('div', class_="AnswerCard").find("div", class_="RichContent-inner")
-    # 去除不必要的style标签
-    for el in answer_content.find_all('style'):
-        el.extract()
-
-    for el in answer_content.select('img[src*="data:image/svg+xml"]'):
-        el.extract()
-    # 添加html外层标签
-    answer_content = html_template(answer_content)
-
-    return answer_content
+    return collection
 
 
-# 获取单条专栏文章的内容
-def get_single_post_content(paper_url):
-    html_content = requests.get(paper_url, headers=headers)
-    soup = BeautifulSoup(html_content.text, "lxml")
-    post_content = soup.find("div", class_="Post-RichText")
-    # 去除不必要的style标签
-    if post_content:
-        for el in post_content.find_all('style'):
-            el.extract()
+def save_collection(collection: Collection, download_dir: str, date_suffix: bool, overwrite_existed: bool = False):
+    collection_title = "".join(x for x in collection.title if (x.isalnum() or x in "._- "))
+    if date_suffix:
+        collection_title += "_" + time.strftime("%Y%m%d")
 
-        for el in post_content.select('img[src*="data:image/svg+xml"]'):
-            el.extract()
-    else:
-        post_content = "该文章链接被404，无法直接访问"
+    Path(download_dir, collection_title).mkdir(parents=True, exist_ok=True)
 
-    # 添加html外层标签
-    post_content = html_template(post_content)
+    i = 0
+    for item in collection.items:
+        print(f"{i + 1}/{len(collection.items)}\t{collection_title}/{item.id}.md")
+        if item.content:
+            convertor = ObsidianStyleConverter(heading_style="ATX")
+            convertor.attachments_save_dir = f"{download_dir}/{collection_title}/attachments"
+            md = convertor.convert(item.content)
+        elif item.type == "zvideo":
+            md = f"[{item.url}]({item.url})"
 
-    return post_content
+        created_time = datetime.utcfromtimestamp(item.created_time).strftime('%Y-%m-%d %H:%M:%S')
+        updated_time = datetime.utcfromtimestamp(item.updated_time).strftime('%Y-%m-%d %H:%M:%S')
+        metadata = ""
+        metadata += f"---\n"
+        metadata += f'id: "{item.id}"\n'
+        metadata += f'url: "{item.url}"\n'
+        metadata += f'type: "{item.type}"\n'
+        if item.title:
+            title = item.title\
+                .replace('"', '\\"')\
+                .replace('\\', '\\\\')
+            metadata += f'title: "{title}"\n'
+        if item.column_url:
+            metadata += f'column: "[{item.column_title}]({item.column_url})"\n'
+        metadata += f'published: "{created_time}"\n'
+        metadata += f'updated: "{updated_time}"\n'
+        metadata += "---\n\n"
+        if item.title:
+            metadata += f"# {item.title}\n\n"
+        md = metadata + md
 
-
-def html_template(data):
-    # api content
-    html = '''
-        <html>
-        <head>
-        <body>
-        %s
-        </body>
-        </head>
-        </html>
-        ''' % data
-    return html
-
-
-
-if __name__=='__main__':
-    args = parser.parse_args()
-    collection_url = args.collection_url[0]
-    collection_id = collection_url.split('?')[0].split('/')[-1]
-    urls,titles = get_article_urls_in_collection(collection_id)
-
-    for  i in  tqdm(range(len(urls))):
-        content = None
-        url = urls[i]
-        title = titles[i]
-
-        if url.find('zhuanlan')!=-1:
-            content = get_single_post_content(url)
+        path = Path(download_dir, collection_title, f"{item.id}.md")
+        if (not overwrite_existed) and path.is_file():
+            pass
         else:
-            content = get_single_answer_content(url)
+            with path.open("w", encoding='utf-8') as md_file:
+                md_file.write(md)
 
-        md = markdownify(content, heading_style="ATX")
-        id = url.split('/')[-1]
-
-        downloadDir = os.path.join(os.path.expanduser("~"), "Downloads", "剪藏")
-        if not os.path.exists(downloadDir):
-            os.mkdir(downloadDir)
-
-        with open(os.path.join(downloadDir, filter_title_str(title) + ".md"), "w", encoding='utf-8') as md_file:
-            md_file.write(md)
-        # print("{} 转换成功".format(id))
-        time.sleep(random.randint(1,5))
-    print("全部下载完毕")
-
-# def testMarkdownifySingleAnswer():
-#     url = "https://www.zhihu.com/question/506166712/answer/2271842801"
-#     content = get_single_answer_content(url)
-#     md = markdownify(content, heading_style="ATX")
-#     id = url.split('/')[-1]
-#
-#     downloadDir = os.path.join(os.path.expanduser("~"), "Downloads", "剪藏")
-#     if not os.path.exists(downloadDir):
-#         os.mkdir(downloadDir)
-#     with open(os.path.join(downloadDir, id + ".md"), "w", encoding='utf-8') as md_file:
-#         md_file.write(md)
-#     print("{} 转换成功".format(id))
-#
-# def testMarkdownifySinglePost():
-#     url = 'https://zhuanlan.zhihu.com/p/386395767'
-#     content = get_single_post_content(url)
-#     md = markdownify(content, heading_style="ATX")
-#     id = url.split('/')[-1]
-#     with open("./" + id + ".md", "w", encoding='utf-8') as md_file:
-#         md_file.write(md)
-#     print("{} 转换成功".format(id))
-#
-#
-# # if __name__ == '__main__':
-# #     testMarkdownifySingleAnswer()
-#
+        i += 1
 
 
-
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='下载知乎收藏夹')
+    parser.add_argument('collection_id', type=str, help="收藏夹链接末尾的数字ID")
+    parser.add_argument('download_dir', type=str, nargs="?", help="下载路径，默认为~/zhihu_collections", default=str(Path.home()/"zhihu_collections"))
+    parser.add_argument('-S', '--date_suffix', action="store_true", help='收藏夹文件名是否用日期作为后缀')
+    parser.add_argument('-f', '--overwrite_existed', action="store_true", help='是否覆盖已存在的md文件')
+    args = parser.parse_args()
+    collection_inst = get_collection(args.collection_id)
+    save_collection(collection_inst, args.download_dir, args.date_suffix, args.overwrite_existed)

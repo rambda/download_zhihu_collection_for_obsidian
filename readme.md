@@ -1,39 +1,32 @@
-# 项目介绍
-该项目用于将知乎的收藏夹（公开）导出为 markdown 格式的文件，供学习和研究使用。
+将知乎公开收藏夹的内容分别保存为 Obsidian 适用的 Markdown 文件。
 
-# 安装
-首先安装 python。
+文件夹以收藏夹名字命名；视频只会保存为链接。
 
-然后安装依赖。
+代码 Forked 自 https://github.com/Geralt-TYH/obsidian-zhihu-crawler ，仅为自用略作调整。
+
+## 说明
+
 ```bash
 pip install -r requirements.txt
 ```
-# 使用
-## 终端
-首先，请找到您想导出的收藏夹的 url。
-然后，在终端（cmd）界面下输入：
-```bash
-python main.py [收藏夹的url]
+### 用法
 ```
-## 图形界面
-从最新的release下载运行文件运行，在输入框 ctrl+v 粘贴收藏夹网址，点击开始剪藏，等待剪藏完毕。
-![img.png](demo.png)
+python main.py collection_id [download_dir] [-S|--date_suffix] [-f|--overwrite_existed]
+```
 
-## 文件存放目录
-等待下载完成后，文件的存放地址将为：
-- markdown 文件将保存在当前操作系统的"**下载**"目录下的"**剪藏**"文件夹下，
-- 文章中的图片将保存在剪藏文件夹中的"**assets**"文件夹中
+`collection_id` - 收藏夹链接末尾的数字ID。
 
-# BUG 反馈
-请直接在issue提供BUG，并请附上问题报错的提示或者网址，方便我复现该问题并解决它。
+`download_dir` - 下载目录路径，不输入则默认为当前用户目录下的`zhihu_collections`文件夹。
 
-# 建议
-- 建议可以在issue中发起
-- 通过电子邮件 tangyinhaowork@qq.com 联系我
-- 在[obsidian 中文论坛](https://forum-zh.obsidian.md/)中 @致九
+`-S`或`--date_suffix` - 输入则将收藏夹ID加到文件名后作为日期后缀。
 
-# 下一步工作
--[ ] 增加 yaml 区域补充元数据
--[x] 将脚本图形化
+`-f`或`--overwrite_existed` - 输入则覆盖已经存在的同名 .md 文件。
 
+### 示例
+
+下载 ID 为 12345 的收藏夹到 Documents 文件夹，并覆盖已下载的文件:
+
+```
+python main.py 12345 "~/Documents/" -f
+```
 
